@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata below."
+title: "Chemometric Workbench (RUO)"
+abstract: >-
+  Research-use-only workbench for multivariate analysis of analytical chemistry
+  data: spectral preprocessing, PCA exploration, and multivariate outlier
+  detection (Hotelling's T-squared and Q-residual / SPE), with a roadmap toward
+  PLS regression, explainable AI, and LC-MS/MS QA review. Not EPA/ISO certified
+  and not for regulatory submission.
+type: software
+authors:
+  - family-names: Ishola
+    given-names: Sunday
+    # orcid: "https://orcid.org/0000-0000-0000-0000"
+    # affiliation: "Your affiliation here"
+repository-code: "https://github.com/Ishola-github/chemometric-workbench"
+license: MIT
+version: v0.1.0
+date-released: "2026-05-30"
+keywords:
+  - chemometrics
+  - multivariate analysis
+  - PCA
+  - outlier detection
+  - spectral preprocessing
+  - analytical chemistry
+  - process analytical technology
+  - research use only

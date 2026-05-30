@@ -1,0 +1,242 @@
+"""Chemometric Workbench (RUO) - Streamlit app.
+
+V1: data import, preprocessing, PCA explorer (scree / score / loading plots),
+and multivariate outlier detection (Hotelling's T-squared vs Q-residual).
+
+Research-use-only. Not a validated or regulatory tool; analyst review required.
+"""
+from __future__ import annotations
+
+import io
+
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import streamlit as st
+
+from chemometrics_core import PREPROCESS_OPTIONS, run_pca
+from sample_data import make_spectral_dataset
+
+st.set_page_config(page_title="Chemometric Workbench (RUO)", layout="wide")
+
+st.title("Chemometric Workbench (RUO)")
+st.caption(
+    "Research/training utility for multivariate analysis of analytical data: "
+    "PCA exploration and outlier diagnostics. Not EPA/ISO certified, not for "
+    "regulatory submission, and independent of any governed reproducibility release. "
+    "All flags are suggested interpretations requiring analyst review."
+)
+
+HELPER_COLS = {"_injected_outlier"}
+
+
+# --------------------------------------------------------------------------- #
+# Data loading
+# --------------------------------------------------------------------------- #
+def load_dataframe() -> pd.DataFrame | None:
+    st.sidebar.header("1. Data")
+    source = st.sidebar.radio(
+        "Data source",
+        ["Synthetic spectral demo", "Upload CSV"],
+        help="The demo generates NIR-like spectra with injected outliers.",
+    )
+    if source == "Synthetic spectral demo":
+        n = st.sidebar.slider("Samples", 40, 300, 120, 10)
+        seed = st.sidebar.number_input("Random seed", value=7, step=1)
+        return make_spectral_dataset(n_samples=int(n), seed=int(seed))
+
+    upload = st.sidebar.file_uploader("Upload a CSV", type=["csv"])
+    if upload is None:
+        st.info("Upload a CSV, or switch to the synthetic spectral demo in the sidebar.")
+        return None
+    return pd.read_csv(upload)
+
+
+df = load_dataframe()
+if df is None:
+    st.stop()
+
+numeric_cols = [c for c in df.columns if c not in HELPER_COLS and pd.api.types.is_numeric_dtype(df[c])]
+meta_candidates = [c for c in df.columns if c not in numeric_cols or c in {"target"}]
+
+st.sidebar.header("2. Columns")
+default_features = [c for c in numeric_cols if c != "target"]
+feature_cols = st.sidebar.multiselect(
+    "Feature columns (X)",
+    options=numeric_cols,
+    default=default_features,
+    help="Numeric variables used to build the PCA model.",
+)
+color_options = ["(none)"] + [c for c in df.columns if c not in feature_cols]
+_preferred = next((c for c in ("group", "_injected_outlier", "sample_id") if c in color_options), None)
+color_by = st.sidebar.selectbox(
+    "Colour points by",
+    color_options,
+    index=color_options.index(_preferred) if _preferred else 0,
+)
+
+st.sidebar.header("3. Model")
+preprocess = st.sidebar.selectbox("Preprocessing", PREPROCESS_OPTIONS, index=PREPROCESS_OPTIONS.index("autoscale"))
+max_pc = max(2, min(len(feature_cols), len(df) - 1))
+n_components = st.sidebar.slider("PCA components", 2, int(min(10, max_pc)), 2)
+confidence = st.sidebar.select_slider("Confidence limit", options=[0.90, 0.95, 0.99], value=0.95)
+
+if len(feature_cols) < 2:
+    st.warning("Select at least two feature columns to run PCA.")
+    st.stop()
+if len(df) < 3:
+    st.warning("Need at least three samples.")
+    st.stop()
+
+X = df[feature_cols].to_numpy(dtype=float)
+if not np.isfinite(X).all():
+    st.warning("Feature matrix contains missing/non-finite values; filling with column means.")
+    col_mean = np.nanmean(np.where(np.isfinite(X), X, np.nan), axis=0)
+    inds = np.where(~np.isfinite(X))
+    X[inds] = np.take(col_mean, inds[1])
+
+result = run_pca(X, n_components=n_components, preprocess=preprocess, confidence=confidence, feature_names=feature_cols)
+
+tab_data, tab_pca, tab_out, tab_about = st.tabs(
+    ["Data", "PCA explorer", "Outlier detection", "About"]
+)
+
+# --------------------------------------------------------------------------- #
+with tab_data:
+    st.subheader("Dataset")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Samples", df.shape[0])
+    c2.metric("Feature columns", len(feature_cols))
+    c3.metric("Preprocessing", preprocess)
+    st.dataframe(df.head(50), use_container_width=True)
+    st.caption(f"Showing first {min(50, len(df))} of {len(df)} rows.")
+
+# --------------------------------------------------------------------------- #
+with tab_pca:
+    st.subheader("Explained variance (scree)")
+    evr = result.explained_variance_ratio
+    scree = pd.DataFrame(
+        {
+            "PC": [f"PC{i+1}" for i in range(len(evr))],
+            "explained_variance": evr,
+            "cumulative": np.cumsum(evr),
+        }
+    )
+    fig_scree = go.Figure()
+    fig_scree.add_bar(x=scree["PC"], y=scree["explained_variance"], name="Explained")
+    fig_scree.add_scatter(x=scree["PC"], y=scree["cumulative"], name="Cumulative", mode="lines+markers")
+    fig_scree.update_layout(yaxis_title="Variance ratio", height=360, legend_orientation="h")
+    st.plotly_chart(fig_scree, use_container_width=True)
+
+    st.subheader("Score plot")
+    cc1, cc2 = st.columns(2)
+    pc_x = cc1.selectbox("X axis", [f"PC{i+1}" for i in range(result.n_components)], index=0)
+    pc_y = cc2.selectbox("Y axis", [f"PC{i+1}" for i in range(result.n_components)], index=min(1, result.n_components - 1))
+    ix, iy = int(pc_x[2:]) - 1, int(pc_y[2:]) - 1
+    score_df = pd.DataFrame({pc_x: result.scores[:, ix], pc_y: result.scores[:, iy]})
+    if color_by != "(none)":
+        score_df[color_by] = df[color_by].values
+    score_df["outlier"] = np.where(result.outlier_mask(), "outlier", "in-model")
+    fig_score = px.scatter(
+        score_df,
+        x=pc_x,
+        y=pc_y,
+        color=color_by if color_by != "(none)" else "outlier",
+        symbol="outlier",
+        hover_data=score_df.columns,
+        height=480,
+    )
+    fig_score.add_hline(y=0, line_dash="dot", line_color="grey")
+    fig_score.add_vline(x=0, line_dash="dot", line_color="grey")
+    st.plotly_chart(fig_score, use_container_width=True)
+
+    st.subheader("Loading plot")
+    show_pcs = st.multiselect(
+        "Components to show", [f"PC{i+1}" for i in range(result.n_components)], default=[pc_x, pc_y]
+    )
+    fig_load = go.Figure()
+    feat_axis = list(range(len(feature_cols)))
+    spectral_like = len(feature_cols) > 30
+    for pc in show_pcs:
+        k = int(pc[2:]) - 1
+        fig_load.add_scatter(
+            x=feat_axis,
+            y=result.loadings[k, :],
+            mode="lines" if spectral_like else "lines+markers",
+            name=pc,
+        )
+    tickvals = feat_axis if not spectral_like else None
+    fig_load.update_layout(
+        height=400,
+        xaxis_title="feature",
+        yaxis_title="loading",
+        xaxis=dict(tickmode="array", tickvals=tickvals, ticktext=feature_cols) if tickvals else {},
+    )
+    st.plotly_chart(fig_load, use_container_width=True)
+
+# --------------------------------------------------------------------------- #
+with tab_out:
+    st.subheader("Hotelling's T\u00b2 vs Q-residual (influence plot)")
+    st.caption(
+        "Top-right quadrant = strong outliers. High T\u00b2 = extreme but consistent with the model; "
+        f"high Q = poor fit to the model. Limits at {int(confidence*100)}% confidence."
+    )
+    influence = pd.DataFrame(result.flag_table())
+    label_col = "sample_id" if "sample_id" in df.columns else None
+    influence["label"] = df[label_col].values if label_col else influence["index"].astype(str)
+    fig_inf = px.scatter(
+        influence,
+        x="T2",
+        y="Q",
+        color="verdict",
+        hover_name="label",
+        height=480,
+        labels={"T2": "Hotelling's T\u00b2", "Q": "Q-residual (SPE)"},
+    )
+    fig_inf.add_vline(x=result.t2_limit, line_dash="dash", line_color="red")
+    fig_inf.add_hline(y=result.q_limit, line_dash="dash", line_color="red")
+    st.plotly_chart(fig_inf, use_container_width=True)
+
+    flagged = influence[influence["verdict"] != "in-model"].copy()
+    cc1, cc2 = st.columns(2)
+    cc1.metric("Flagged samples", len(flagged))
+    cc2.metric("Total samples", len(influence))
+    st.markdown("**Flagged samples (suggested review)**")
+    show = flagged if len(flagged) else influence
+    cols = ["label", "T2", "T2_limit", "Q", "Q_limit", "verdict"]
+    st.dataframe(show[cols].round(4), use_container_width=True)
+
+    csv_buf = io.StringIO()
+    influence_out = influence.copy()
+    influence_out.to_csv(csv_buf, index=False)
+    st.download_button(
+        "Download diagnostics (CSV)",
+        csv_buf.getvalue(),
+        file_name="pca_outlier_diagnostics.csv",
+        mime="text/csv",
+    )
+
+# --------------------------------------------------------------------------- #
+with tab_about:
+    st.subheader("About this tool")
+    st.markdown(
+        """
+**Chemometric Workbench (RUO)** is a research/training utility for multivariate
+analysis of analytical chemistry data.
+
+**V1 capabilities**
+- CSV import or synthetic spectral demo data
+- Preprocessing: mean-centering, autoscaling, SNV, MSC, Savitzky-Golay (smooth / 1st derivative)
+- PCA: scree, score, and loading plots
+- Multivariate outlier detection: Hotelling's T\u00b2 and Q-residual (SPE) with
+  statistically derived control limits (F-distribution and Jackson-Mudholkar)
+
+**Roadmap:** PLS regression + cross-validation, SHAP / feature importance,
+applicability-domain flags, and an LC-MS/MS QA review module.
+
+**Governance:** Research-use-only. Not EPA/ISO certified, not validated for
+regulatory submission, and intentionally separate from any governed
+reproducibility/evidence release. All outputs require qualified analyst review.
+        """
+    )
