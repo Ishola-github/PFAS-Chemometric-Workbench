@@ -8,6 +8,7 @@ Research-use-only. Not a validated or regulatory tool; analyst review required.
 from __future__ import annotations
 
 import io
+import pickle
 
 import numpy as np
 import pandas as pd
@@ -15,7 +16,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from chemometrics_core import PREPROCESS_OPTIONS, run_pca
+from chemometrics_core import PREPROCESS_OPTIONS, run_pca, run_pls_regression
 from sample_data import make_spectral_dataset
 
 st.set_page_config(page_title="Chemometric Workbench (RUO)", layout="wide")
@@ -98,8 +99,8 @@ if not np.isfinite(X).all():
 
 result = run_pca(X, n_components=n_components, preprocess=preprocess, confidence=confidence, feature_names=feature_cols)
 
-tab_data, tab_pca, tab_out, tab_about = st.tabs(
-    ["Data", "PCA explorer", "Outlier detection", "About"]
+tab_data, tab_pca, tab_out, tab_pls, tab_about = st.tabs(
+    ["Data", "PCA explorer", "Outlier detection", "PLS regression", "About"]
 )
 
 # --------------------------------------------------------------------------- #
@@ -218,6 +219,141 @@ with tab_out:
     )
 
 # --------------------------------------------------------------------------- #
+with tab_pls:
+    st.subheader("PLS regression")
+    st.caption(
+        "Train/test/CV PLS workflow for quantitative targets (RUO). "
+        "Outputs are suggested decision support; analyst review required."
+    )
+
+    numeric_targets = [c for c in numeric_cols if c not in feature_cols] + [c for c in feature_cols if c == "target"]
+    numeric_targets = list(dict.fromkeys(numeric_targets))
+    if not numeric_targets:
+        st.info("No numeric target column is available. Add a numeric target to run PLS.")
+    else:
+        c1, c2, c3, c4 = st.columns(4)
+        target_col = c1.selectbox("Target column (y)", options=numeric_targets, index=0)
+        test_size = c2.slider("Test fraction", 0.1, 0.4, 0.2, 0.05)
+        cv_folds = c3.slider("CV folds", 3, 10, 5, 1)
+        random_state = c4.number_input("Random state", value=42, step=1)
+
+        max_pls = max(1, min(20, len(feature_cols), len(df) - 2))
+        n_comp_pls = st.slider("PLS components", 1, int(max_pls), min(3, int(max_pls)))
+
+        y = df[target_col].to_numpy(dtype=float)
+        valid_mask = np.isfinite(y) & np.isfinite(X).all(axis=1)
+        dropped = int((~valid_mask).sum())
+        X_pls = X[valid_mask]
+        y_pls = y[valid_mask]
+        idx_pls = np.where(valid_mask)[0]
+        label_series = (
+            df.loc[valid_mask, "sample_id"].astype(str).values
+            if "sample_id" in df.columns
+            else idx_pls.astype(str)
+        )
+
+        if dropped > 0:
+            st.warning(f"Dropped {dropped} rows with missing/non-finite X or y values for PLS.")
+        if len(y_pls) < 8:
+            st.warning("Need at least 8 valid rows to run PLS train/test + CV.")
+        else:
+            pls = run_pls_regression(
+                X=X_pls,
+                y=y_pls,
+                feature_names=feature_cols,
+                preprocess=preprocess,
+                n_components=int(n_comp_pls),
+                test_size=float(test_size),
+                cv_folds=int(cv_folds),
+                random_state=int(random_state),
+            )
+
+            mtrain = pls["metrics_train"]
+            mtest = pls["metrics_test"]
+            mcv = pls["metrics_cv"]
+
+            mt1, mt2, mt3, mt4 = st.columns(4)
+            mt1.metric("Test RMSE", f"{mtest['rmse']:.4g}")
+            mt2.metric("Test R²", f"{mtest['r2']:.4f}")
+            mt3.metric("CV RMSE", f"{mcv['rmse']:.4g}")
+            mt4.metric("CV R²", f"{mcv['r2']:.4f}")
+
+            st.caption(
+                f"Train RMSE={mtrain['rmse']:.4g}, Train R²={mtrain['r2']:.4f}, "
+                f"MAE(test)={mtest['mae']:.4g}"
+            )
+
+            pred = pd.DataFrame(pls["pred_df"])
+            pred["sample_id"] = label_series[pred["index"].to_numpy()]
+
+            chart_df = pred[pred["set"].isin(["train", "test"])].copy()
+            fig_pa = px.scatter(
+                chart_df,
+                x="actual",
+                y="predicted",
+                color="set",
+                hover_name="sample_id",
+                height=430,
+                labels={"actual": "Actual", "predicted": "Predicted"},
+            )
+            if not chart_df.empty:
+                mn = float(min(chart_df["actual"].min(), chart_df["predicted"].min()))
+                mx = float(max(chart_df["actual"].max(), chart_df["predicted"].max()))
+                fig_pa.add_shape(type="line", x0=mn, y0=mn, x1=mx, y1=mx, line=dict(dash="dash", color="gray"))
+            st.plotly_chart(fig_pa, use_container_width=True)
+
+            fig_res = px.scatter(
+                chart_df,
+                x="predicted",
+                y="residual",
+                color="set",
+                hover_name="sample_id",
+                height=380,
+                labels={"predicted": "Predicted", "residual": "Residual (actual - predicted)"},
+            )
+            fig_res.add_hline(y=0, line_dash="dash", line_color="gray")
+            st.plotly_chart(fig_res, use_container_width=True)
+
+            sweep = pd.DataFrame(pls["component_sweep_df"])
+            fig_sweep = px.line(
+                sweep,
+                x="components",
+                y="cv_rmse",
+                markers=True,
+                height=320,
+                labels={"components": "PLS components", "cv_rmse": "CV RMSE"},
+            )
+            fig_sweep.add_vline(x=int(n_comp_pls), line_dash="dot", line_color="gray")
+            st.plotly_chart(fig_sweep, use_container_width=True)
+
+            st.markdown("**Predictions table**")
+            st.dataframe(
+                pred.sort_values(["set", "index"])[["sample_id", "set", "actual", "predicted", "residual"]].round(5),
+                use_container_width=True,
+            )
+
+            csv_buf = io.StringIO()
+            pred.to_csv(csv_buf, index=False)
+            st.download_button(
+                "Download PLS predictions (CSV)",
+                csv_buf.getvalue(),
+                file_name="pls_predictions.csv",
+                mime="text/csv",
+            )
+
+            model_payload = {
+                "model": pls["model"],
+                "meta": pls["meta"],
+                "target_col": target_col,
+            }
+            st.download_button(
+                "Download PLS model (PKL)",
+                data=pickle.dumps(model_payload),
+                file_name="pls_model.pkl",
+                mime="application/octet-stream",
+            )
+
+# --------------------------------------------------------------------------- #
 with tab_about:
     st.subheader("About this tool")
     st.markdown(
@@ -225,15 +361,17 @@ with tab_about:
 **Chemometric Workbench (RUO)** is a research/training utility for multivariate
 analysis of analytical chemistry data.
 
-**V1 capabilities**
+**Current capabilities**
 - CSV import or synthetic spectral demo data
 - Preprocessing: mean-centering, autoscaling, SNV, MSC, Savitzky-Golay (smooth / 1st derivative)
 - PCA: scree, score, and loading plots
 - Multivariate outlier detection: Hotelling's T\u00b2 and Q-residual (SPE) with
   statistically derived control limits (F-distribution and Jackson-Mudholkar)
+- PLS regression: train/test/CV metrics (RMSE, MAE, R\u00b2), predicted vs actual,
+  residual plots, component sweep, and model/prediction export
 
-**Roadmap:** PLS regression + cross-validation, SHAP / feature importance,
-applicability-domain flags, and an LC-MS/MS QA review module.
+**Roadmap:** SHAP / feature importance, applicability-domain flags,
+batch anomaly detection, and an LC-MS/MS QA review module.
 
 **Governance:** Research-use-only. Not EPA/ISO certified, not validated for
 regulatory submission, and intentionally separate from any governed

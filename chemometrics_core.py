@@ -14,7 +14,10 @@ import numpy as np
 from scipy.signal import savgol_filter
 from scipy.stats import f as f_dist
 from scipy.stats import norm
+from sklearn.cross_decomposition import PLSRegression
 from sklearn.decomposition import PCA
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import KFold, train_test_split
 
 # --------------------------------------------------------------------------- #
 # Preprocessing
@@ -229,3 +232,142 @@ def run_pca(
         confidence=confidence,
         feature_names=list(feature_names),
     )
+
+
+# --------------------------------------------------------------------------- #
+# PLS regression (V2)
+# --------------------------------------------------------------------------- #
+
+
+def rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    return float(np.sqrt(mean_squared_error(y_true, y_pred)))
+
+
+def mae(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    return float(mean_absolute_error(y_true, y_pred))
+
+
+def r2(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    return float(r2_score(y_true, y_pred))
+
+
+def _metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
+    return {
+        "rmse": rmse(y_true, y_pred),
+        "mae": mae(y_true, y_pred),
+        "r2": r2(y_true, y_pred),
+    }
+
+
+def run_pls_regression(
+    X: np.ndarray,
+    y: np.ndarray,
+    feature_names: list[str],
+    preprocess: str = "autoscale",
+    n_components: int = 2,
+    test_size: float = 0.2,
+    cv_folds: int = 5,
+    random_state: int = 42,
+) -> dict:
+    """Fit/train/test/CV PLS model and return metrics + prediction tables."""
+    X = np.asarray(X, dtype=float)
+    y = np.asarray(y, dtype=float).reshape(-1)
+    if X.shape[0] != y.shape[0]:
+        raise ValueError("X and y must have the same number of rows.")
+    if X.shape[0] < 8:
+        raise ValueError("Need at least 8 rows for train/test + CV.")
+    if len(feature_names) != X.shape[1]:
+        raise ValueError("feature_names length must match X columns.")
+
+    Xp = apply_preprocess(X, preprocess)
+
+    X_train, X_test, y_train, y_test, idx_train, idx_test = train_test_split(
+        Xp,
+        y,
+        np.arange(len(y)),
+        test_size=test_size,
+        random_state=random_state,
+    )
+
+    max_allowed = max(1, min(X_train.shape[0] - 1, X_train.shape[1]))
+    k = int(max(1, min(n_components, max_allowed)))
+
+    model = PLSRegression(n_components=k, scale=False)
+    model.fit(X_train, y_train)
+
+    y_pred_train = model.predict(X_train).reshape(-1)
+    y_pred_test = model.predict(X_test).reshape(-1)
+
+    metrics_train = _metrics(y_train, y_pred_train)
+    metrics_test = _metrics(y_test, y_pred_test)
+
+    # Out-of-fold CV predictions across all rows (same k).
+    cv_folds = int(max(3, min(cv_folds, len(y) - 1)))
+    kf = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
+    y_oof = np.zeros_like(y, dtype=float)
+    for tr, va in kf.split(Xp):
+        max_k_fold = max(1, min(len(tr) - 1, Xp.shape[1]))
+        k_fold = int(min(k, max_k_fold))
+        m = PLSRegression(n_components=k_fold, scale=False)
+        m.fit(Xp[tr], y[tr])
+        y_oof[va] = m.predict(Xp[va]).reshape(-1)
+    metrics_cv = _metrics(y, y_oof)
+
+    # Component sweep for CV RMSE/R2.
+    sweep_rows = []
+    max_sweep = int(max(1, min(20, Xp.shape[1], len(y) - 2)))
+    for c in range(1, max_sweep + 1):
+        oof = np.zeros_like(y, dtype=float)
+        for tr, va in kf.split(Xp):
+            c_fold = int(min(c, max(1, min(len(tr) - 1, Xp.shape[1]))))
+            m = PLSRegression(n_components=c_fold, scale=False)
+            m.fit(Xp[tr], y[tr])
+            oof[va] = m.predict(Xp[va]).reshape(-1)
+        sweep_rows.append(
+            {
+                "components": c,
+                "cv_rmse": rmse(y, oof),
+                "cv_r2": r2(y, oof),
+            }
+        )
+
+    pred_train = np.array(["train"] * len(y_train), dtype=object)
+    pred_test = np.array(["test"] * len(y_test), dtype=object)
+    pred_oof = np.array(["cv_oof"] * len(y), dtype=object)
+
+    pred_df = np.concatenate(
+        [
+            np.column_stack([idx_train, pred_train, y_train, y_pred_train, y_train - y_pred_train]),
+            np.column_stack([idx_test, pred_test, y_test, y_pred_test, y_test - y_pred_test]),
+            np.column_stack([np.arange(len(y)), pred_oof, y, y_oof, y - y_oof]),
+        ],
+        axis=0,
+    )
+
+    pred_df = np.asarray(pred_df, dtype=object)
+    pred_table = {
+        "index": pred_df[:, 0].astype(int),
+        "set": pred_df[:, 1].astype(str),
+        "actual": pred_df[:, 2].astype(float),
+        "predicted": pred_df[:, 3].astype(float),
+        "residual": pred_df[:, 4].astype(float),
+    }
+
+    return {
+        "model": model,
+        "metrics_train": metrics_train,
+        "metrics_test": metrics_test,
+        "metrics_cv": metrics_cv,
+        "pred_df": pred_table,
+        "component_sweep_df": sweep_rows,
+        "meta": {
+            "n_samples": int(len(y)),
+            "n_features": int(X.shape[1]),
+            "n_components": int(k),
+            "preprocess": preprocess,
+            "test_size": float(test_size),
+            "cv_folds": int(cv_folds),
+            "random_state": int(random_state),
+            "feature_names": list(feature_names),
+        },
+    }

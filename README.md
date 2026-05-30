@@ -1,4 +1,4 @@
-# Chemometric Workbench (RUO)
+# PFAS Chemometric Workbench (RUO)
 
 Research-use-only (RUO) workbench for multivariate analysis of analytical
 chemistry data: PCA exploration, spectral preprocessing, and multivariate
@@ -12,7 +12,7 @@ review.
 > or frozen-evidence release. All flags and model outputs are *suggested
 > interpretations* that require qualified analyst review.
 
-## Features (V1)
+## Features
 
 - **Data import** — upload a CSV (samples × variables) or use the built-in
   synthetic NIR-like spectral demo (with injected outliers).
@@ -23,13 +23,15 @@ review.
 - **Outlier detection** — Hotelling's T² vs Q-residual influence plot with
   statistically derived control limits (F-distribution for T², Jackson-Mudholkar
   for Q), a flagged-sample table, and CSV export of diagnostics.
+- **PLS regression (V2)** — train/test/CV workflow with RMSE, MAE, R²,
+  predicted-vs-actual and residual plots, component sweep (CV RMSE), and CSV/PKL export.
 
 ## Roadmap
 
 | Version | Adds |
 |---------|------|
-| V1 (this) | PCA, preprocessing, T²/Q outlier detection |
-| V2 | PLS regression, cross-validation, RMSE, prediction dashboard |
+| V1 | PCA, preprocessing, T²/Q outlier detection |
+| V2 (current) | PLS regression, cross-validation, RMSE/MAE/R², prediction dashboard, model export |
 | V3 | SHAP, feature importance, applicability domain, uncertainty flags |
 | V4 | LC-MS/MS QA review: retention-time monitoring, peak-area drift, batch QC |
 | V5 | PFAS chemometric module (screening + QA + sustainability metrics) |
@@ -63,11 +65,12 @@ python sample_data.py   # writes examples/example_spectra.csv
 
 ```text
 chemometric-workbench/
-├── app.py                 # Streamlit UI (V1)
-├── chemometrics_core.py   # preprocessing + PCA + T²/Q diagnostics
+├── app.py                 # Streamlit UI (PCA + Outlier + PLS)
+├── chemometrics_core.py   # preprocessing + PCA/T²/Q + PLS/CV utilities
 ├── sample_data.py         # synthetic spectral dataset generator
 ├── requirements.txt
 ├── examples/              # generated example CSV
+├── CHANGELOG.md
 ├── README.md
 ├── LICENSE
 └── CITATION.cff
