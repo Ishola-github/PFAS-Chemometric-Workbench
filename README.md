@@ -25,14 +25,17 @@ review.
   for Q), a flagged-sample table, and CSV export of diagnostics.
 - **PLS regression (V2)** — train/test/CV workflow with RMSE, MAE, R²,
   predicted-vs-actual and residual plots, component sweep (CV RMSE), and CSV/PKL export.
+- **Explainability + confidence (V3)** — coefficient-based feature influence ranking,
+  applicability-domain checks (Mahalanobis + leverage), uncertainty levels
+  (`LOW/MEDIUM/HIGH`), review-required flags, and consolidated diagnostics export.
 
 ## Roadmap
 
 | Version | Adds |
 |---------|------|
 | V1 | PCA, preprocessing, T²/Q outlier detection |
-| V2 (current) | PLS regression, cross-validation, RMSE/MAE/R², prediction dashboard, model export |
-| V3 | SHAP, feature importance, applicability domain, uncertainty flags |
+| V2 | PLS regression, cross-validation, RMSE/MAE/R², prediction dashboard, model export |
+| V3 (current) | Feature influence ranking, applicability domain, uncertainty/review flags |
 | V4 | LC-MS/MS QA review: retention-time monitoring, peak-area drift, batch QC |
 | V5 | PFAS chemometric module (screening + QA + sustainability metrics) |
 

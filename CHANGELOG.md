@@ -8,10 +8,26 @@ Research-use-only (RUO): this software is not validated regulatory software.
 ## [Unreleased]
 
 ### Planned
-- SHAP and feature-importance views
-- Applicability domain and uncertainty flags
+- Optional SHAP view
 - LC/MS/MS QA review module (retention-time and peak-area drift)
 - Batch anomaly detection dashboard
+
+## [v0.3.0] - 2026-05-30
+
+### Added
+- PLS explainability panel with coefficient-based feature influence ranking and CSV export.
+- Applicability-domain scoring using:
+  - Mahalanobis distance in latent score space
+  - Leverage thresholding
+  - In-domain / out-of-domain flags
+- Uncertainty and review layer with:
+  - LOW/MEDIUM/HIGH uncertainty levels from CV residual behavior
+  - Review-required flags when out-of-domain or high-uncertainty
+- Consolidated export combining predictions + AD + uncertainty fields.
+
+### Changed
+- README updated to mark V3 capability status.
+- About panel updated with explainability/AD/uncertainty descriptions.
 
 ## [v0.2.0] - 2026-05-30
 

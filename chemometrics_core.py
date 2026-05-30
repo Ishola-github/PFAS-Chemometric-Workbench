@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 from scipy.signal import savgol_filter
+from scipy.stats import chi2
 from scipy.stats import f as f_dist
 from scipy.stats import norm
 from sklearn.cross_decomposition import PLSRegression
@@ -259,6 +260,81 @@ def _metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     }
 
 
+def mahalanobis_scores(S: np.ndarray) -> np.ndarray:
+    """Mahalanobis distance in score space for each row of S."""
+    S = np.asarray(S, dtype=float)
+    if S.ndim != 2:
+        raise ValueError("S must be 2D (n_samples, n_components)")
+    if S.shape[0] < 3:
+        return np.zeros(S.shape[0], dtype=float)
+
+    mu = S.mean(axis=0, keepdims=True)
+    C = np.cov(S, rowvar=False)
+    if np.ndim(C) == 0:
+        C = np.array([[float(C)]], dtype=float)
+    C_inv = np.linalg.pinv(C)
+    D = S - mu
+    d2 = np.einsum("ij,jk,ik->i", D, C_inv, D)
+    return np.sqrt(np.clip(d2, 0.0, None))
+
+
+def leverage_scores(S: np.ndarray) -> np.ndarray:
+    """Leverage h = diag(S (S'S)^-1 S')."""
+    S = np.asarray(S, dtype=float)
+    if S.ndim != 2:
+        raise ValueError("S must be 2D (n_samples, n_components)")
+    XtX_inv = np.linalg.pinv(S.T @ S)
+    H = S @ XtX_inv @ S.T
+    return np.clip(np.diag(H), 0.0, None)
+
+
+def ad_thresholds(n_samples: int, n_components: int, confidence: float = 0.95) -> dict:
+    """Return AD thresholds for Mahalanobis and leverage."""
+    n = max(1, int(n_samples))
+    a = max(1, int(n_components))
+    mahal_limit = float(np.sqrt(chi2.ppf(confidence, df=a)))
+    lev_limit = float(3.0 * (a + 1) / n)
+    return {"mahal_limit": mahal_limit, "lev_limit": lev_limit}
+
+
+def uncertainty_from_cv_residuals(residuals_cv: np.ndarray, z: float = 1.96) -> dict:
+    """Estimate uncertainty from CV residual distribution."""
+    r = np.asarray(residuals_cv, dtype=float).reshape(-1)
+    sigma = float(np.std(r, ddof=1)) if len(r) > 1 else 0.0
+    return {"sigma": sigma, "pi_half_width": float(z * sigma)}
+
+
+def pls_feature_influence(
+    model: PLSRegression,
+    feature_names: list[str],
+    X_ref: np.ndarray | None = None,
+) -> list[dict]:
+    """Rank features by PLS coefficient magnitude (raw + standardized)."""
+    beta = np.asarray(model.coef_).reshape(-1)
+    abs_beta = np.abs(beta)
+
+    if X_ref is not None:
+        sd = np.asarray(X_ref, dtype=float).std(axis=0, ddof=1)
+        sd[sd == 0] = 1.0
+        std_abs = np.abs(beta * sd)
+    else:
+        std_abs = abs_beta.copy()
+
+    order = np.argsort(-std_abs)
+    rows = []
+    for rank, j in enumerate(order, start=1):
+        rows.append(
+            {
+                "feature": feature_names[j],
+                "coef": float(beta[j]),
+                "abs_coef": float(abs_beta[j]),
+                "std_abs_coef": float(std_abs[j]),
+                "rank": rank,
+            }
+        )
+    return rows
+
+
 def run_pls_regression(
     X: np.ndarray,
     y: np.ndarray,
@@ -353,6 +429,48 @@ def run_pls_regression(
         "residual": pred_df[:, 4].astype(float),
     }
 
+    scores_all = model.transform(Xp)
+    maha = mahalanobis_scores(scores_all)
+    lev = leverage_scores(scores_all)
+    ad_lims = ad_thresholds(len(y), k, confidence=0.95)
+    in_domain = (maha <= ad_lims["mahal_limit"]) & (lev <= ad_lims["lev_limit"])
+    ad_table = []
+    for i in range(len(y)):
+        ad_table.append(
+            {
+                "index": int(i),
+                "mahalanobis": float(maha[i]),
+                "mahal_limit": float(ad_lims["mahal_limit"]),
+                "leverage": float(lev[i]),
+                "lev_limit": float(ad_lims["lev_limit"]),
+                "in_domain": bool(in_domain[i]),
+            }
+        )
+
+    residuals_cv = y - y_oof
+    u = uncertainty_from_cv_residuals(residuals_cv, z=1.96)
+    sigma = u["sigma"]
+    pi_half_width = u["pi_half_width"]
+    uncertainty_table = []
+    for i in range(len(y)):
+        ar = abs(residuals_cv[i])
+        if ar <= sigma:
+            level = "LOW"
+        elif ar <= 2 * sigma:
+            level = "MEDIUM"
+        else:
+            level = "HIGH"
+        uncertainty_table.append(
+            {
+                "index": int(i),
+                "pi_half_width": float(pi_half_width),
+                "uncertainty_level": level,
+                "review_required": bool((not in_domain[i]) or (level == "HIGH")),
+            }
+        )
+
+    influence_table = pls_feature_influence(model, feature_names, X_ref=Xp)
+
     return {
         "model": model,
         "metrics_train": metrics_train,
@@ -360,6 +478,10 @@ def run_pls_regression(
         "metrics_cv": metrics_cv,
         "pred_df": pred_table,
         "component_sweep_df": sweep_rows,
+        "ad_table": ad_table,
+        "uncertainty_table": uncertainty_table,
+        "influence_table": influence_table,
+        "scores_all": scores_all,
         "meta": {
             "n_samples": int(len(y)),
             "n_features": int(X.shape[1]),
@@ -369,5 +491,9 @@ def run_pls_regression(
             "cv_folds": int(cv_folds),
             "random_state": int(random_state),
             "feature_names": list(feature_names),
+            "ad_confidence": 0.95,
+            "mahal_limit": float(ad_lims["mahal_limit"]),
+            "lev_limit": float(ad_lims["lev_limit"]),
+            "pi_half_width": float(pi_half_width),
         },
     }

@@ -353,6 +353,84 @@ with tab_pls:
                 mime="application/octet-stream",
             )
 
+            st.markdown("### Model explainability (PLS coefficient influence)")
+            inf = pd.DataFrame(pls["influence_table"])
+            top_n = st.slider("Top influential features", 5, 40, 20, 1, key="pls_topn")
+            inf_top = inf.head(top_n).copy()
+            fig_inf = px.bar(
+                inf_top.iloc[::-1],
+                x="std_abs_coef",
+                y="feature",
+                orientation="h",
+                height=420,
+                labels={"std_abs_coef": "Standardized |coefficient|", "feature": "Feature"},
+            )
+            st.plotly_chart(fig_inf, use_container_width=True)
+            buf_inf = io.StringIO()
+            inf.to_csv(buf_inf, index=False)
+            st.download_button(
+                "Download feature influence (CSV)",
+                buf_inf.getvalue(),
+                file_name="pls_feature_influence.csv",
+                mime="text/csv",
+            )
+
+            st.markdown("### Applicability domain (AD)")
+            ad = pd.DataFrame(pls["ad_table"])
+            ad["sample_id"] = label_series[ad["index"].to_numpy()]
+            ad["domain_flag"] = np.where(ad["in_domain"], "in_domain", "out_of_domain")
+            ad1, ad2 = st.columns(2)
+            ad1.metric("In-domain", int(ad["in_domain"].sum()))
+            ad2.metric("Out-of-domain", int((~ad["in_domain"]).sum()))
+            fig_ad = px.scatter(
+                ad,
+                x="mahalanobis",
+                y="leverage",
+                color="domain_flag",
+                hover_name="sample_id",
+                height=420,
+            )
+            fig_ad.add_vline(x=float(ad["mahal_limit"].iloc[0]), line_dash="dash", line_color="red")
+            fig_ad.add_hline(y=float(ad["lev_limit"].iloc[0]), line_dash="dash", line_color="red")
+            st.plotly_chart(fig_ad, use_container_width=True)
+
+            st.markdown("### Uncertainty and review flags")
+            u = pd.DataFrame(pls["uncertainty_table"])
+            u["sample_id"] = label_series[u["index"].to_numpy()]
+            vc = u["uncertainty_level"].value_counts()
+            u1, u2, u3, u4 = st.columns(4)
+            u1.metric("LOW", int(vc.get("LOW", 0)))
+            u2.metric("MEDIUM", int(vc.get("MEDIUM", 0)))
+            u3.metric("HIGH", int(vc.get("HIGH", 0)))
+            u4.metric("Review required", int(u["review_required"].sum()))
+            fig_u = px.histogram(
+                u,
+                x="uncertainty_level",
+                color="uncertainty_level",
+                category_orders={"uncertainty_level": ["LOW", "MEDIUM", "HIGH"]},
+                height=300,
+            )
+            st.plotly_chart(fig_u, use_container_width=True)
+
+            st.markdown("### Consolidated export")
+            pred_export = pred.merge(
+                ad[["index", "mahalanobis", "mahal_limit", "leverage", "lev_limit", "in_domain"]],
+                on="index",
+                how="left",
+            ).merge(
+                u[["index", "pi_half_width", "uncertainty_level", "review_required"]],
+                on="index",
+                how="left",
+            )
+            buf_all = io.StringIO()
+            pred_export.to_csv(buf_all, index=False)
+            st.download_button(
+                "Download PLS predictions + AD + uncertainty (CSV)",
+                buf_all.getvalue(),
+                file_name="pls_predictions_with_ad_uncertainty.csv",
+                mime="text/csv",
+            )
+
 # --------------------------------------------------------------------------- #
 with tab_about:
     st.subheader("About this tool")
@@ -369,9 +447,11 @@ analysis of analytical chemistry data.
   statistically derived control limits (F-distribution and Jackson-Mudholkar)
 - PLS regression: train/test/CV metrics (RMSE, MAE, R\u00b2), predicted vs actual,
   residual plots, component sweep, and model/prediction export
+- Explainability + confidence: coefficient-based feature influence, applicability
+  domain checks (Mahalanobis + leverage), uncertainty levels, and review flags
 
-**Roadmap:** SHAP / feature importance, applicability-domain flags,
-batch anomaly detection, and an LC-MS/MS QA review module.
+**Roadmap:** optional SHAP panel, batch anomaly detection, and an LC-MS/MS QA
+review module.
 
 **Governance:** Research-use-only. Not EPA/ISO certified, not validated for
 regulatory submission, and intentionally separate from any governed
